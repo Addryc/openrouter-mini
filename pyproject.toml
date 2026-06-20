@@ -1,0 +1,19 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "openrouter-mini"
+version = "0.1.0"
+description = "Minimal httpx OpenRouter chat-completions adapter with usage + prompt caching."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "Steve McGarrity" }]
+dependencies = ["httpx>=0.27"]
+
+[project.urls]
+Homepage = "https://github.com/Addryc/openrouter-mini"
+
+[tool.hatch.build.targets.wheel]
+packages = ["openrouter_mini"]
