@@ -206,8 +206,21 @@ def _extract_usage(payload: dict[str, Any]) -> Usage:
         total_tokens=_as_int(raw_usage.get("total_tokens")),
         cached_tokens=_as_int(cached),
         cache_write_tokens=_as_int(cache_write),
-        cost=_as_float(raw_usage.get("cost")),
+        cost=_resolve_cost(raw_usage),
     )
+
+
+def _resolve_cost(raw_usage: dict[str, Any]) -> float | None:
+    # Top-level `cost` is OpenRouter's own charge. Under BYOK it is 0 and the real
+    # provider spend lives in `cost_details.upstream_inference_cost`. Prefer the
+    # top-level cost when it is non-zero; otherwise fall back to upstream.
+    cost = raw_usage.get("cost")
+    if cost:
+        return _as_float(cost)
+    details = raw_usage.get("cost_details")
+    if isinstance(details, dict) and details.get("upstream_inference_cost") is not None:
+        return _as_float(details["upstream_inference_cost"])
+    return _as_float(cost)
 
 
 def _as_int(value: Any) -> int | None:

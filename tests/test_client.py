@@ -101,6 +101,29 @@ class OpenRouterClientTest(unittest.TestCase):
 
         self.assertEqual(fake.posted["json"]["usage"], {"include": True})
 
+    def test_cost_falls_back_to_upstream_under_byok(self) -> None:
+        usage = {
+            "prompt_tokens": 3114,
+            "cost": 0,
+            "is_byok": True,
+            "cost_details": {"upstream_inference_cost": 0.049662},
+        }
+        fake = _FakeClient(_FakeResponse(_ok_payload(usage)))
+        client = OpenRouterClient(_config(), http_client=fake)
+
+        client(Prompt(system="s", user="u"))
+
+        self.assertEqual(client.last_usage.cost, 0.049662)
+
+    def test_top_level_cost_wins_when_nonzero(self) -> None:
+        usage = {"cost": 0.0012, "cost_details": {"upstream_inference_cost": 9.99}}
+        fake = _FakeClient(_FakeResponse(_ok_payload(usage)))
+        client = OpenRouterClient(_config(), http_client=fake)
+
+        client(Prompt(system="s", user="u"))
+
+        self.assertEqual(client.last_usage.cost, 0.0012)
+
     def test_top_level_cached_tokens_fallback(self) -> None:
         usage = {"prompt_tokens": 10, "cached_tokens": 4}
         fake = _FakeClient(_FakeResponse(_ok_payload(usage)))
