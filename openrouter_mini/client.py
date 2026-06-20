@@ -105,7 +105,13 @@ class OpenRouterClient:
         return content
 
     def _post(self, prompt: Prompt) -> dict[str, Any]:
-        body = {"model": self._config.model, "messages": _messages_for_prompt(prompt)}
+        body = {
+            "model": self._config.model,
+            "messages": _messages_for_prompt(prompt),
+            # Opt in to OpenRouter usage accounting so the response carries cost
+            # and the cache-token breakdown; without it both come back empty.
+            "usage": {"include": True},
+        }
         headers = {
             "Authorization": f"Bearer {self._config.api_key}",
             "Content-Type": "application/json",

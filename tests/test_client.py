@@ -93,6 +93,14 @@ class OpenRouterClientTest(unittest.TestCase):
         self.assertEqual(messages[1], {"role": "user", "content": "volatile"})
         self.assertEqual(fake.posted["json"]["model"], "test-model")
 
+    def test_request_opts_into_usage_accounting(self) -> None:
+        fake = _FakeClient(_FakeResponse(_ok_payload()))
+        client = OpenRouterClient(_config(), http_client=fake)
+
+        client(Prompt(system="s", user="u"))
+
+        self.assertEqual(fake.posted["json"]["usage"], {"include": True})
+
     def test_top_level_cached_tokens_fallback(self) -> None:
         usage = {"prompt_tokens": 10, "cached_tokens": 4}
         fake = _FakeClient(_FakeResponse(_ok_payload(usage)))
