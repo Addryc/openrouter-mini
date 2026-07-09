@@ -5,11 +5,16 @@ HTTP request, a timeout budget, typed errors, usage extraction, and prompt cachi
 (`cache_control` on the stable system prefix) — and nothing else. Prompt content and
 any domain logic stay in the consuming project.
 
-It exists so projects that call OpenRouter (e.g. `solo-mud-platform`,
-`lego-moc-builder`) stop maintaining duplicate adapters. See ADR 0005 in
-solo-mud-platform for the rationale (chosen over the OpenAI SDK to keep the
-dependency footprint to general-purpose `httpx` and avoid provider-coupling on the
-OpenRouter-specific usage/cost/cache fields).
+It exists so my projects that call OpenRouter stop maintaining duplicate adapters.
+It was chosen over the OpenAI SDK to keep the dependency footprint to
+general-purpose `httpx` and to own the OpenRouter-specific usage/cost/cache
+extraction (including the BYOK case, where the real spend lives in
+`cost_details.upstream_inference_cost`).
+
+> **Status:** public so my own projects can pin it; maintained for their needs.
+> Use it freely under MIT, but the deliberately small scope (no streaming, no
+> multi-turn, no tool calls) is a feature — expect feature requests to be
+> declined. Forks welcome.
 
 ## Install
 
@@ -17,7 +22,7 @@ Pin to a tag from the consumer's `pyproject.toml`:
 
 ```toml
 dependencies = [
-  "openrouter-mini @ git+https://github.com/Addryc/openrouter-mini@v0.1.0",
+  "openrouter-mini @ git+https://github.com/Addryc/openrouter-mini@v0.3.1",
 ]
 ```
 
