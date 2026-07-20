@@ -50,6 +50,23 @@ prompt caching. Caching only pays when the prefix is reused many times within th
 short ephemeral window — verify real cache hits against `last_raw_usage`
 (`cached_tokens > 0`) with a live, key-gated probe, not a unit test.
 
+### Provider routing preferences
+
+The same model id can vary widely in throughput depending on which upstream
+provider serves it. Pass `provider_preferences` to forward an
+[OpenRouter provider routing](https://openrouter.ai/docs/features/provider-routing)
+object verbatim as the request's `provider` field:
+
+```python
+client = load_client(provider_preferences={"sort": "throughput", "allow_fallbacks": True})
+```
+
+The mapping is intentionally untyped — routing fields belong to OpenRouter's
+schema, and new ones work without a library release. Omit it (the default) and
+request bodies are byte-identical to previous releases. Prefer advisory ordering
+(`sort`/`order` with fallbacks) over hard `only` pinning, which changes failure
+semantics.
+
 ## Develop
 
 ```bash

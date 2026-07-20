@@ -101,6 +101,26 @@ class OpenRouterClientTest(unittest.TestCase):
 
         self.assertEqual(fake.posted["json"]["usage"], {"include": True})
 
+    def test_provider_preferences_pass_through_verbatim(self) -> None:
+        preferences = {"sort": "throughput", "allow_fallbacks": True}
+        fake = _FakeClient(_FakeResponse(_ok_payload()))
+        config = OpenRouterConfig(
+            api_key="key", model="test-model", provider_preferences=preferences
+        )
+        client = OpenRouterClient(config, http_client=fake)
+
+        client(Prompt(system="s", user="u"))
+
+        self.assertEqual(fake.posted["json"]["provider"], preferences)
+
+    def test_no_provider_block_without_preferences(self) -> None:
+        fake = _FakeClient(_FakeResponse(_ok_payload()))
+        client = OpenRouterClient(_config(), http_client=fake)
+
+        client(Prompt(system="s", user="u"))
+
+        self.assertNotIn("provider", fake.posted["json"])
+
     def test_cost_falls_back_to_upstream_under_byok(self) -> None:
         usage = {
             "prompt_tokens": 3114,

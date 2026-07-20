@@ -59,21 +59,39 @@ class Usage:
 
 @dataclass(frozen=True)
 class OpenRouterConfig:
-    """Resolved adapter settings."""
+    """Resolved adapter settings.
+
+    ``provider_preferences`` is passed through verbatim as the request body's
+    ``provider`` field (OpenRouter provider routing: ``order``, ``only``,
+    ``ignore``, ``allow_fallbacks``, ``sort``, ...). The mapping is untyped on
+    purpose — routing fields belong to OpenRouter's schema, not this adapter —
+    and ``None`` (the default) leaves request bodies byte-identical to
+    previous releases.
+    """
 
     api_key: str
     model: str = DEFAULT_MODEL
     request_timeout_seconds: float = DEFAULT_REQUEST_TIMEOUT_SECONDS
+    provider_preferences: dict[str, Any] | None = None
 
 
-def load_config(*, api_key: str | None = None, model: str | None = None) -> OpenRouterConfig:
+def load_config(
+    *,
+    api_key: str | None = None,
+    model: str | None = None,
+    provider_preferences: dict[str, Any] | None = None,
+) -> OpenRouterConfig:
     """Resolve configuration from explicit values or the environment."""
 
     resolved_key = api_key or os.getenv(OPENROUTER_API_KEY_ENV)
     if not resolved_key:
         raise OpenRouterConfigurationError(f"{OPENROUTER_API_KEY_ENV} is required")
     resolved_model = model or os.getenv(OPENROUTER_MODEL_ENV) or DEFAULT_MODEL
-    return OpenRouterConfig(api_key=resolved_key, model=resolved_model)
+    return OpenRouterConfig(
+        api_key=resolved_key,
+        model=resolved_model,
+        provider_preferences=provider_preferences,
+    )
 
 
 class OpenRouterClient:
@@ -112,6 +130,8 @@ class OpenRouterClient:
             # and the cache-token breakdown; without it both come back empty.
             "usage": {"include": True},
         }
+        if self._config.provider_preferences is not None:
+            body["provider"] = dict(self._config.provider_preferences)
         headers = {
             "Authorization": f"Bearer {self._config.api_key}",
             "Content-Type": "application/json",
@@ -134,10 +154,18 @@ def load_client(
     api_key: str | None = None,
     model: str | None = None,
     http_client: Any | None = None,
+    provider_preferences: dict[str, Any] | None = None,
 ) -> OpenRouterClient:
     """Build a client from the environment (or explicit overrides)."""
 
-    return build_client(load_config(api_key=api_key, model=model), http_client=http_client)
+    return build_client(
+        load_config(
+            api_key=api_key,
+            model=model,
+            provider_preferences=provider_preferences,
+        ),
+        http_client=http_client,
+    )
 
 
 def _messages_for_prompt(prompt: Prompt) -> list[dict[str, Any]]:
