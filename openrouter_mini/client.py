@@ -8,9 +8,10 @@ The provider JSON shape stays inside this module; consumers depend on the typed
 
 from __future__ import annotations
 
+import json
 import os
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Iterator
 
 import httpx
 
@@ -122,8 +123,29 @@ class OpenRouterClient:
         self.last_raw_usage = raw_usage if isinstance(raw_usage, dict) else None
         return content
 
+    def stream(self, prompt: Prompt) -> Iterator[str]:
+        self.last_usage = None
+        self.last_raw_usage = None
+        body = self._request_body(prompt, stream=True)
+        headers = self._headers()
+        if self._http_client is None:
+            timeout = httpx.Timeout(self._config.request_timeout_seconds)
+            with httpx.Client(timeout=timeout) as http_client:
+                yield from self._stream(http_client, headers, body)
+            return
+        yield from self._stream(self._http_client, headers, body)
+
     def _post(self, prompt: Prompt) -> dict[str, Any]:
-        body = {
+        body = self._request_body(prompt)
+        headers = self._headers()
+        if self._http_client is None:
+            timeout = httpx.Timeout(self._config.request_timeout_seconds)
+            with httpx.Client(timeout=timeout) as http_client:
+                return _request(http_client, headers, body)
+        return _request(self._http_client, headers, body)
+
+    def _request_body(self, prompt: Prompt, *, stream: bool = False) -> dict[str, Any]:
+        body: dict[str, Any] = {
             "model": self._config.model,
             "messages": _messages_for_prompt(prompt),
             # Opt in to OpenRouter usage accounting so the response carries cost
@@ -132,15 +154,56 @@ class OpenRouterClient:
         }
         if self._config.provider_preferences is not None:
             body["provider"] = dict(self._config.provider_preferences)
-        headers = {
+        if stream:
+            body["stream"] = True
+            body["stream_options"] = {"include_usage": True}
+        return body
+
+    def _headers(self) -> dict[str, str]:
+        return {
             "Authorization": f"Bearer {self._config.api_key}",
             "Content-Type": "application/json",
         }
-        if self._http_client is None:
-            timeout = httpx.Timeout(self._config.request_timeout_seconds)
-            with httpx.Client(timeout=timeout) as http_client:
-                return _request(http_client, headers, body)
-        return _request(self._http_client, headers, body)
+
+    def _stream(self, client: Any, headers: dict[str, str], body: dict[str, Any]) -> Iterator[str]:
+        terminal_payload: dict[str, Any] | None = None
+        try:
+            with client.stream(
+                "POST",
+                OPENROUTER_CHAT_COMPLETIONS_URL,
+                headers=headers,
+                json=body,
+            ) as response:
+                response.raise_for_status()
+                for line in response.iter_lines():
+                    if not line or not line.startswith("data: "):
+                        continue
+                    data = line.removeprefix("data: ")
+                    if data == "[DONE]":
+                        break
+                    try:
+                        payload = json.loads(data)
+                    except ValueError as exc:
+                        raise OpenRouterResponseError("OpenRouter returned invalid JSON") from exc
+                    if not isinstance(payload, dict):
+                        raise OpenRouterResponseError("OpenRouter returned a non-object payload")
+                    terminal_payload = payload
+                    raw_usage = payload.get("usage")
+                    if isinstance(raw_usage, dict):
+                        self.last_usage = _extract_usage(payload)
+                        self.last_raw_usage = raw_usage
+                    content = _extract_stream_delta(payload)
+                    if content is not None:
+                        yield content
+        except (httpx.RequestError, httpx.HTTPStatusError) as exc:
+            raise OpenRouterRequestError("OpenRouter request failed") from exc
+        if terminal_payload is not None:
+            raw_usage = terminal_payload.get("usage")
+            if isinstance(raw_usage, dict):
+                self.last_usage = _extract_usage(terminal_payload)
+                self.last_raw_usage = raw_usage
+        if self.last_usage is None:
+            self.last_usage = Usage()
 
 
 def build_client(config: OpenRouterConfig, *, http_client: Any | None = None) -> OpenRouterClient:
@@ -202,6 +265,24 @@ def _request(client: Any, headers: dict[str, str], body: dict[str, Any]) -> dict
     if not isinstance(payload, dict):
         raise OpenRouterResponseError("OpenRouter returned a non-object payload")
     return payload
+
+
+def _extract_stream_delta(payload: dict[str, Any]) -> str | None:
+    choices = payload.get("choices")
+    if not isinstance(choices, list) or not choices:
+        return None
+    first_choice = choices[0]
+    if not isinstance(first_choice, dict):
+        raise OpenRouterResponseError("OpenRouter returned an invalid stream chunk")
+    delta = first_choice.get("delta")
+    if not isinstance(delta, dict):
+        return None
+    content = delta.get("content")
+    if content is None:
+        return None
+    if not isinstance(content, str):
+        raise OpenRouterResponseError("OpenRouter response content must be a string")
+    return content
 
 
 def _extract_content(payload: dict[str, Any]) -> str:
