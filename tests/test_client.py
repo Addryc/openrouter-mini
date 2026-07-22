@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import unittest
 from unittest import mock
 
@@ -18,10 +19,20 @@ from openrouter_mini.client import OPENROUTER_CHAT_COMPLETIONS_URL
 
 
 class _FakeResponse:
-    def __init__(self, payload, *, status_error: bool = False, bad_json: bool = False) -> None:
+    def __init__(
+        self,
+        payload,
+        *,
+        status_error: bool = False,
+        bad_json: bool = False,
+        lines=None,
+        raise_request_error_at: int | None = None,
+    ) -> None:
         self._payload = payload
         self._status_error = status_error
         self._bad_json = bad_json
+        self._lines = list(lines or [])
+        self._raise_request_error_at = raise_request_error_at
 
     def raise_for_status(self) -> None:
         if self._status_error:
@@ -34,18 +45,42 @@ class _FakeResponse:
             raise ValueError("invalid json")
         return self._payload
 
+    def iter_lines(self):
+        for index, line in enumerate(self._lines):
+            if self._raise_request_error_at is not None and index == self._raise_request_error_at:
+                raise httpx.RequestError("boom")
+            yield line
+
+
+class _FakeStreamContextManager:
+    def __init__(self, response: _FakeResponse) -> None:
+        self._response = response
+
+    def __enter__(self):
+        return self._response
+
+    def __exit__(self, exc_type, exc, tb):
+        return False
+
 
 class _FakeClient:
     def __init__(self, response=None, *, raise_request_error: bool = False) -> None:
         self._response = response
         self._raise_request_error = raise_request_error
         self.posted = None
+        self.streamed = None
 
     def post(self, url, *, headers, json):
         self.posted = {"url": url, "headers": headers, "json": json}
         if self._raise_request_error:
             raise httpx.RequestError("boom")
         return self._response
+
+    def stream(self, method, url, *, headers, json):
+        self.streamed = {"method": method, "url": url, "headers": headers, "json": json}
+        if self._raise_request_error:
+            raise httpx.RequestError("boom")
+        return _FakeStreamContextManager(self._response)
 
 
 def _config() -> OpenRouterConfig:
@@ -161,6 +196,71 @@ class OpenRouterClientTest(unittest.TestCase):
 
         self.assertIsNone(client.last_usage.prompt_tokens)
         self.assertIsNone(client.last_raw_usage)
+
+    def test_stream_yields_deltas_and_records_terminal_usage(self) -> None:
+        usage = {
+            "prompt_tokens": 3114,
+            "completion_tokens": 222,
+            "total_tokens": 3336,
+            "prompt_tokens_details": {"cached_tokens": 80},
+            "cost": 0,
+            "cost_details": {"upstream_inference_cost": 0.049662},
+        }
+        lines = [
+            'data: {"choices":[{"delta":{"content":"he"}}]}',
+            'data: {"choices":[{"delta":{}}]}',
+            'data: {"choices":[{"delta":{"content":"llo"}}],"usage":' + json.dumps(usage) + "}",
+            "data: [DONE]",
+        ]
+        fake = _FakeClient(_FakeResponse(None, lines=lines))
+        client = OpenRouterClient(_config(), http_client=fake)
+
+        result = "".join(client.stream(Prompt(system="sys", user="usr")))
+
+        self.assertEqual(result, "hello")
+        self.assertEqual(fake.streamed["method"], "POST")
+        self.assertEqual(fake.streamed["url"], OPENROUTER_CHAT_COMPLETIONS_URL)
+        self.assertEqual(fake.streamed["json"]["stream"], True)
+        self.assertEqual(fake.streamed["json"]["stream_options"], {"include_usage": True})
+        self.assertEqual(fake.streamed["json"]["usage"], {"include": True})
+        self.assertEqual(client.last_usage.prompt_tokens, 3114)
+        self.assertEqual(client.last_usage.completion_tokens, 222)
+        self.assertEqual(client.last_usage.total_tokens, 3336)
+        self.assertEqual(client.last_usage.cached_tokens, 80)
+        self.assertEqual(client.last_usage.cost, 0.049662)
+        self.assertEqual(client.last_raw_usage, usage)
+
+    def test_stream_skips_chunks_without_delta_content(self) -> None:
+        lines = [
+            'data: {"choices":[{"delta":{"content":"he"}}]}',
+            'data: {"choices":[{"delta":{}}]}',
+            'data: {"choices":[{"delta":{"content":null}}]}',
+            'data: {"choices":[{"delta":{"content":"llo"}}]}',
+            "data: [DONE]",
+        ]
+        fake = _FakeClient(_FakeResponse(None, lines=lines))
+        client = OpenRouterClient(_config(), http_client=fake)
+
+        self.assertEqual("".join(client.stream(Prompt(system="sys", user="usr"))), "hello")
+
+    def test_stream_mid_stream_request_error_is_wrapped(self) -> None:
+        lines = [
+            'data: {"choices":[{"delta":{"content":"he"}}]}',
+            'data: {"choices":[{"delta":{"content":"llo"}}]}',
+        ]
+        fake = _FakeClient(_FakeResponse(None, lines=lines, raise_request_error_at=1))
+        client = OpenRouterClient(_config(), http_client=fake)
+
+        with self.assertRaises(OpenRouterRequestError):
+            "".join(client.stream(Prompt(system="s", user="u")))
+
+    def test_stream_malformed_chunk_raises_response_error(self) -> None:
+        lines = ["data: not-json"]
+        fake = _FakeClient(_FakeResponse(None, lines=lines))
+        client = OpenRouterClient(_config(), http_client=fake)
+
+        with self.assertRaises(OpenRouterResponseError):
+            "".join(client.stream(Prompt(system="s", user="u")))
 
     def test_request_error_is_wrapped(self) -> None:
         fake = _FakeClient(raise_request_error=True)
