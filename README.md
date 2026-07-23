@@ -67,6 +67,20 @@ request bodies are byte-identical to previous releases. Prefer advisory ordering
 (`sort`/`order` with fallbacks) over hard `only` pinning, which changes failure
 semantics.
 
+### Output token cap
+
+Pass `max_tokens` to cap completion length, either as a config-level default or
+per call (the per-call value wins):
+
+```python
+client = load_client(max_tokens=4096)
+text = client(Prompt(system="...", user="..."), max_tokens=8192)
+```
+
+It is forwarded verbatim as the request body's `max_tokens` field. Omit it (the
+default) and the field is not sent, leaving request bodies identical to previous
+releases.
+
 ## Develop
 
 ```bash

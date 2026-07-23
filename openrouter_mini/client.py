@@ -68,12 +68,17 @@ class OpenRouterConfig:
     purpose — routing fields belong to OpenRouter's schema, not this adapter —
     and ``None`` (the default) leaves request bodies byte-identical to
     previous releases.
+
+    ``max_tokens`` is the default output cap sent as the request body's
+    ``max_tokens`` field; individual calls can override it. ``None`` (the
+    default) omits the field entirely.
     """
 
     api_key: str
     model: str = DEFAULT_MODEL
     request_timeout_seconds: float = DEFAULT_REQUEST_TIMEOUT_SECONDS
     provider_preferences: dict[str, Any] | None = None
+    max_tokens: int | None = None
 
 
 def load_config(
@@ -81,6 +86,7 @@ def load_config(
     api_key: str | None = None,
     model: str | None = None,
     provider_preferences: dict[str, Any] | None = None,
+    max_tokens: int | None = None,
 ) -> OpenRouterConfig:
     """Resolve configuration from explicit values or the environment."""
 
@@ -92,6 +98,7 @@ def load_config(
         api_key=resolved_key,
         model=resolved_model,
         provider_preferences=provider_preferences,
+        max_tokens=max_tokens,
     )
 
 
@@ -113,20 +120,20 @@ class OpenRouterClient:
     def config(self) -> OpenRouterConfig:
         return self._config
 
-    def __call__(self, prompt: Prompt) -> str:
+    def __call__(self, prompt: Prompt, *, max_tokens: int | None = None) -> str:
         self.last_usage = None
         self.last_raw_usage = None
-        payload = self._post(prompt)
+        payload = self._post(prompt, max_tokens=max_tokens)
         content = _extract_content(payload)
         self.last_usage = _extract_usage(payload)
         raw_usage = payload.get("usage")
         self.last_raw_usage = raw_usage if isinstance(raw_usage, dict) else None
         return content
 
-    def stream(self, prompt: Prompt) -> Iterator[str]:
+    def stream(self, prompt: Prompt, *, max_tokens: int | None = None) -> Iterator[str]:
         self.last_usage = None
         self.last_raw_usage = None
-        body = self._request_body(prompt, stream=True)
+        body = self._request_body(prompt, stream=True, max_tokens=max_tokens)
         headers = self._headers()
         if self._http_client is None:
             timeout = httpx.Timeout(self._config.request_timeout_seconds)
@@ -135,8 +142,8 @@ class OpenRouterClient:
             return
         yield from self._stream(self._http_client, headers, body)
 
-    def _post(self, prompt: Prompt) -> dict[str, Any]:
-        body = self._request_body(prompt)
+    def _post(self, prompt: Prompt, *, max_tokens: int | None = None) -> dict[str, Any]:
+        body = self._request_body(prompt, max_tokens=max_tokens)
         headers = self._headers()
         if self._http_client is None:
             timeout = httpx.Timeout(self._config.request_timeout_seconds)
@@ -144,7 +151,13 @@ class OpenRouterClient:
                 return _request(http_client, headers, body)
         return _request(self._http_client, headers, body)
 
-    def _request_body(self, prompt: Prompt, *, stream: bool = False) -> dict[str, Any]:
+    def _request_body(
+        self,
+        prompt: Prompt,
+        *,
+        stream: bool = False,
+        max_tokens: int | None = None,
+    ) -> dict[str, Any]:
         body: dict[str, Any] = {
             "model": self._config.model,
             "messages": _messages_for_prompt(prompt),
@@ -154,6 +167,9 @@ class OpenRouterClient:
         }
         if self._config.provider_preferences is not None:
             body["provider"] = dict(self._config.provider_preferences)
+        resolved_max_tokens = max_tokens if max_tokens is not None else self._config.max_tokens
+        if resolved_max_tokens is not None:
+            body["max_tokens"] = resolved_max_tokens
         if stream:
             body["stream"] = True
             body["stream_options"] = {"include_usage": True}
@@ -218,6 +234,7 @@ def load_client(
     model: str | None = None,
     http_client: Any | None = None,
     provider_preferences: dict[str, Any] | None = None,
+    max_tokens: int | None = None,
 ) -> OpenRouterClient:
     """Build a client from the environment (or explicit overrides)."""
 
@@ -226,6 +243,7 @@ def load_client(
             api_key=api_key,
             model=model,
             provider_preferences=provider_preferences,
+            max_tokens=max_tokens,
         ),
         http_client=http_client,
     )

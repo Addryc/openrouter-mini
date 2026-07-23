@@ -156,6 +156,68 @@ class OpenRouterClientTest(unittest.TestCase):
 
         self.assertNotIn("provider", fake.posted["json"])
 
+    def test_no_max_tokens_field_by_default(self) -> None:
+        fake = _FakeClient(_FakeResponse(_ok_payload()))
+        client = OpenRouterClient(_config(), http_client=fake)
+
+        client(Prompt(system="s", user="u"))
+
+        self.assertNotIn("max_tokens", fake.posted["json"])
+
+    def test_config_max_tokens_is_sent(self) -> None:
+        fake = _FakeClient(_FakeResponse(_ok_payload()))
+        config = OpenRouterConfig(api_key="key", model="test-model", max_tokens=4096)
+        client = OpenRouterClient(config, http_client=fake)
+
+        client(Prompt(system="s", user="u"))
+
+        self.assertEqual(fake.posted["json"]["max_tokens"], 4096)
+
+    def test_per_call_max_tokens_overrides_config(self) -> None:
+        fake = _FakeClient(_FakeResponse(_ok_payload()))
+        config = OpenRouterConfig(api_key="key", model="test-model", max_tokens=4096)
+        client = OpenRouterClient(config, http_client=fake)
+
+        client(Prompt(system="s", user="u"), max_tokens=8192)
+
+        self.assertEqual(fake.posted["json"]["max_tokens"], 8192)
+
+    def test_per_call_max_tokens_without_config_default(self) -> None:
+        fake = _FakeClient(_FakeResponse(_ok_payload()))
+        client = OpenRouterClient(_config(), http_client=fake)
+
+        client(Prompt(system="s", user="u"), max_tokens=2048)
+
+        self.assertEqual(fake.posted["json"]["max_tokens"], 2048)
+
+    def test_stream_carries_max_tokens(self) -> None:
+        lines = [
+            'data: {"choices":[{"delta":{"content":"hello"}}]}',
+            "data: [DONE]",
+        ]
+        fake = _FakeClient(_FakeResponse(None, lines=lines))
+        client = OpenRouterClient(_config(), http_client=fake)
+
+        "".join(client.stream(Prompt(system="s", user="u"), max_tokens=1024))
+
+        self.assertEqual(fake.streamed["json"]["max_tokens"], 1024)
+
+    def test_stream_omits_max_tokens_by_default(self) -> None:
+        lines = [
+            'data: {"choices":[{"delta":{"content":"hello"}}]}',
+            "data: [DONE]",
+        ]
+        fake = _FakeClient(_FakeResponse(None, lines=lines))
+        client = OpenRouterClient(_config(), http_client=fake)
+
+        "".join(client.stream(Prompt(system="s", user="u")))
+
+        self.assertNotIn("max_tokens", fake.streamed["json"])
+
+    def test_load_config_carries_max_tokens(self) -> None:
+        config = load_config(api_key="k", model="m", max_tokens=512)
+        self.assertEqual(config.max_tokens, 512)
+
     def test_cost_falls_back_to_upstream_under_byok(self) -> None:
         usage = {
             "prompt_tokens": 3114,
