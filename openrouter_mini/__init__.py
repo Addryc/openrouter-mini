@@ -1,7 +1,9 @@
 """Minimal, shared OpenRouter chat-completions adapter (httpx, no SDK).
 
-Public surface: a callable ``OpenRouterClient`` plus the ``Prompt`` / ``Usage`` /
-``OpenRouterConfig`` types and typed errors. See ADR 0005 in solo-mud-platform.
+Public surface: a callable ``OpenRouterClient`` plus the ``Prompt`` /
+``ReasoningEffort`` / ``ReasoningRequest`` / ``Usage`` / ``OpenRouterConfig``
+types and typed errors.
+See ADR 0005 in solo-mud-platform.
 """
 
 from openrouter_mini.client import (
@@ -17,6 +19,8 @@ from openrouter_mini.client import (
     OpenRouterRequestError,
     OpenRouterResponseError,
     Prompt,
+    ReasoningEffort,
+    ReasoningRequest,
     Usage,
     build_client,
     load_client,
@@ -36,10 +40,12 @@ __all__ = [
     "OpenRouterRequestError",
     "OpenRouterResponseError",
     "Prompt",
+    "ReasoningEffort",
+    "ReasoningRequest",
     "Usage",
     "build_client",
     "load_client",
     "load_config",
 ]
 
-__version__ = "0.5.0"
+__version__ = "0.6.0"

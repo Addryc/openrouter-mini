@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 import unittest
+from dataclasses import FrozenInstanceError
+from typing import get_args
 from unittest import mock
 
 import httpx
@@ -13,6 +15,8 @@ from openrouter_mini import (
     OpenRouterRequestError,
     OpenRouterResponseError,
     Prompt,
+    ReasoningEffort,
+    ReasoningRequest,
     load_config,
 )
 from openrouter_mini.client import OPENROUTER_CHAT_COMPLETIONS_URL
@@ -99,6 +103,7 @@ class OpenRouterClientTest(unittest.TestCase):
         usage = {
             "prompt_tokens": 100,
             "completion_tokens": 20,
+            "completion_tokens_details": {"reasoning_tokens": 7},
             "total_tokens": 120,
             "prompt_tokens_details": {"cached_tokens": 80},
             "cost": 0.0012,
@@ -112,6 +117,7 @@ class OpenRouterClientTest(unittest.TestCase):
         self.assertEqual(client.last_usage.prompt_tokens, 100)
         self.assertEqual(client.last_usage.completion_tokens, 20)
         self.assertEqual(client.last_usage.cached_tokens, 80)
+        self.assertEqual(client.last_usage.reasoning_tokens, 7)
         self.assertEqual(client.last_usage.cost, 0.0012)
         self.assertEqual(client.last_raw_usage, usage)
 
@@ -163,6 +169,7 @@ class OpenRouterClientTest(unittest.TestCase):
         client(Prompt(system="s", user="u"))
 
         self.assertNotIn("max_tokens", fake.posted["json"])
+        self.assertNotIn("reasoning", fake.posted["json"])
 
     def test_config_max_tokens_is_sent(self) -> None:
         fake = _FakeClient(_FakeResponse(_ok_payload()))
@@ -213,6 +220,64 @@ class OpenRouterClientTest(unittest.TestCase):
         "".join(client.stream(Prompt(system="s", user="u")))
 
         self.assertNotIn("max_tokens", fake.streamed["json"])
+        self.assertNotIn("reasoning", fake.streamed["json"])
+
+    def test_reasoning_effort_is_serialized_for_nonstreaming_call(self) -> None:
+        fake = _FakeClient(_FakeResponse(_ok_payload()))
+        client = OpenRouterClient(_config(), http_client=fake)
+
+        client(Prompt(system="s", user="u"), reasoning=ReasoningRequest(effort="high"))
+
+        self.assertEqual(fake.posted["json"]["reasoning"], {"effort": "high"})
+
+    def test_reasoning_effort_alias_owns_all_serialized_efforts(self) -> None:
+        expected_efforts = ("max", "xhigh", "high", "medium", "low", "minimal", "none")
+
+        self.assertEqual(get_args(ReasoningEffort), expected_efforts)
+        for effort in get_args(ReasoningEffort):
+            fake = _FakeClient(_FakeResponse(_ok_payload()))
+            client = OpenRouterClient(_config(), http_client=fake)
+
+            client(Prompt(system="s", user="u"), reasoning=ReasoningRequest(effort=effort))
+
+            self.assertEqual(fake.posted["json"]["reasoning"], {"effort": effort})
+
+    def test_reasoning_token_budget_is_serialized_for_stream(self) -> None:
+        lines = ['data: {"choices":[{"delta":{"content":"hello"}}]}', "data: [DONE]"]
+        fake = _FakeClient(_FakeResponse(None, lines=lines))
+        client = OpenRouterClient(_config(), http_client=fake)
+
+        "".join(
+            client.stream(
+                Prompt(system="s", user="u"),
+                reasoning=ReasoningRequest(max_tokens=512),
+            )
+        )
+
+        self.assertEqual(fake.streamed["json"]["reasoning"], {"max_tokens": 512})
+
+    def test_reasoning_request_rejects_invalid_policies(self) -> None:
+        invalid_policies = (
+            {},
+            {"effort": "high", "max_tokens": 512},
+            {"max_tokens": 0},
+            {"max_tokens": -1},
+            {"max_tokens": True},
+            {"effort": "unsupported"},
+            {"effort": ["high"]},
+        )
+
+        for policy in invalid_policies:
+            with self.subTest(policy=policy):
+                with self.assertRaises(ValueError):
+                    ReasoningRequest(**policy)
+
+    def test_reasoning_request_is_publicly_exported(self) -> None:
+        request = ReasoningRequest(effort="minimal")
+
+        self.assertEqual(request.effort, "minimal")
+        with self.assertRaises(FrozenInstanceError):
+            request.effort = "high"
 
     def test_load_config_carries_max_tokens(self) -> None:
         config = load_config(api_key="k", model="m", max_tokens=512)
@@ -263,6 +328,7 @@ class OpenRouterClientTest(unittest.TestCase):
         usage = {
             "prompt_tokens": 3114,
             "completion_tokens": 222,
+            "completion_tokens_details": {"reasoning_tokens": 91},
             "total_tokens": 3336,
             "prompt_tokens_details": {"cached_tokens": 80},
             "cost": 0,
@@ -289,6 +355,7 @@ class OpenRouterClientTest(unittest.TestCase):
         self.assertEqual(client.last_usage.completion_tokens, 222)
         self.assertEqual(client.last_usage.total_tokens, 3336)
         self.assertEqual(client.last_usage.cached_tokens, 80)
+        self.assertEqual(client.last_usage.reasoning_tokens, 91)
         self.assertEqual(client.last_usage.cost, 0.049662)
         self.assertEqual(client.last_raw_usage, usage)
 
