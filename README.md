@@ -1,112 +1,135 @@
 # openrouter-mini
 
-A deliberately small OpenRouter chat-completions adapter over `httpx`. It owns the
-HTTP request, a timeout budget, typed errors, usage extraction, and prompt caching
-(`cache_control` on the stable system prefix) — and nothing else. Prompt content and
-any domain logic stay in the consuming project.
+A deliberately small OpenRouter chat-completions adapter over `httpx`. It owns
+request construction, a timeout budget, typed errors, normalized usage, and
+prompt caching (`cache_control` on the stable system prefix). Prompt content,
+multi-turn orchestration, tool calls, structured-output handling, retries, and
+domain policy belong to the consuming project.
 
-It exists so my projects that call OpenRouter stop maintaining duplicate adapters.
-It was chosen over the OpenAI SDK to keep the dependency footprint to
-general-purpose `httpx` and to own the OpenRouter-specific usage/cost/cache
-extraction (including the BYOK case, where the real spend lives in
-`cost_details.upstream_inference_cost`).
+It exists so projects using OpenRouter do not maintain duplicate adapters. The
+package uses general-purpose `httpx` instead of an SDK while keeping
+OpenRouter-specific cache and cost extraction in one place.
 
-> **Status:** public so my own projects can pin it; maintained for their needs.
-> Use it freely under MIT, but the deliberately small scope (no streaming, no
-> multi-turn, no tool calls) is a feature — expect feature requests to be
-> declined. Forks welcome.
+> **Status:** public so related projects can pin it; maintained for those
+> needs. The intentionally small scope is a feature. Forks welcome under MIT.
 
 ## Install
 
-Pin to a tag from the consumer's `pyproject.toml`:
+Pin the HTTPS tag tarball in a consumer `pyproject.toml`; this does not require
+Git in the consumer image:
 
 ```toml
 dependencies = [
-  "openrouter-mini @ git+https://github.com/Addryc/openrouter-mini@v0.3.1",
+  "openrouter-mini @ https://github.com/Addryc/openrouter-mini/archive/refs/tags/v0.6.0.tar.gz",
 ]
 ```
 
-For local development of the package itself, use an editable install:
+For local package development, use an editable install:
 
 ```bash
 pip install -e /path/to/openrouter-mini
 ```
 
-## Usage
+## Complete a request
+
+`load_client()` reads `OPENROUTER_API_KEY` and the optional
+`OPENROUTER_MODEL`. Pass explicit `api_key` or `model` values to override them.
+`OpenRouterError` is the public base error; configuration, request, and
+unexpected-response failures use its typed subclasses.
 
 ```python
-from openrouter_mini import load_client, Prompt
+from openrouter_mini import OpenRouterError, Prompt, load_client
 
-client = load_client()  # reads OPENROUTER_API_KEY (+ optional OPENROUTER_MODEL)
-text = client(Prompt(system="<stable, cacheable prefix>", user="<volatile turn>"))
+try:
+    client = load_client()
+    text = client(Prompt(system="<stable prefix>", user="<current turn>"))
+except OpenRouterError as exc:
+    # Handle adapter configuration, request, or response failures.
+    raise
 
-print(client.last_usage)      # normalized Usage(prompt_tokens=..., cached_tokens=..., cost=...)
-print(client.last_raw_usage)  # provider's raw usage block, for cache verification
+print(text)
+print(client.last_usage)
+print(client.last_raw_usage)  # provider's raw usage block, when supplied
 ```
 
-The `system` text is sent as a cacheable block (`cache_control: ephemeral`); put the
-large stable prefix there and the small changing content in `user` to benefit from
-prompt caching. Caching only pays when the prefix is reused many times within the
-short ephemeral window — verify real cache hits against `last_raw_usage`
-(`cached_tokens > 0`) with a live, key-gated probe, not a unit test.
+`last_usage` is an adapter-owned `Usage` summary. Each field can be `None` when
+the provider omits it: `prompt_tokens`, `completion_tokens`, `total_tokens`,
+`cached_tokens`, `cache_write_tokens`, `reasoning_tokens`, and `cost`.
+`last_raw_usage` retains the raw provider `usage` mapping when present for
+diagnostics such as cache verification. For BYOK responses with a zero top-level
+cost, `cost` falls back to `cost_details.upstream_inference_cost` when supplied.
 
-### Provider routing preferences
+## Stream a request
 
-The same model id can vary widely in throughput depending on which upstream
-provider serves it. Pass `provider_preferences` to forward an
+`stream()` yields text deltas. Consume the iterator fully before reading final
+`last_usage` or `last_raw_usage`: terminal streaming usage arrives at the end of
+the stream.
+
+```python
+from openrouter_mini import Prompt, load_client
+
+client = load_client()
+for delta in client.stream(Prompt(system="<stable prefix>", user="<current turn>")):
+    print(delta, end="", flush=True)
+
+print(client.last_usage)
+print(client.last_raw_usage)
+```
+
+## Prompt caching and provider routing
+
+Non-empty `system` text is sent as a cacheable text block
+(`cache_control: ephemeral`); `user` carries the changing turn. Reuse a stable
+system prefix to make caching possible, then confirm real cache behavior from
+`last_raw_usage` rather than a unit test.
+
+Pass `provider_preferences` to forward an
 [OpenRouter provider routing](https://openrouter.ai/docs/features/provider-routing)
-object verbatim as the request's `provider` field:
+mapping verbatim as the request's `provider` field:
 
 ```python
 client = load_client(provider_preferences={"sort": "throughput", "allow_fallbacks": True})
 ```
 
-The mapping is intentionally untyped — routing fields belong to OpenRouter's
-schema, and new ones work without a library release. Omit it (the default) and
-request bodies are byte-identical to previous releases. Prefer advisory ordering
-(`sort`/`order` with fallbacks) over hard `only` pinning, which changes failure
-semantics.
+The mapping is intentionally untyped because its fields belong to OpenRouter.
+Omit it to omit the `provider` field; provider routing behavior remains
+OpenRouter's responsibility.
 
-### Output token cap
+## Output and reasoning controls
 
-Pass `max_tokens` to cap completion length, either as a config-level default or
-per call (the per-call value wins):
-
-```python
-client = load_client(max_tokens=4096)
-text = client(Prompt(system="...", user="..."), max_tokens=8192)
-```
-
-It is forwarded verbatim as the request body's `max_tokens` field. Omit it (the
-default) and the field is not sent, leaving request bodies identical to previous
-releases.
-
-### Reasoning controls
-
-Use the adapter-owned `ReasoningRequest` per call to select either a reasoning
-effort level or a positive reasoning-token budget. The two controls are mutually
-exclusive; omit `reasoning` to leave existing request bodies unchanged.
+`max_tokens` is the output-token cap. Set it on `OpenRouterConfig` through
+`load_client(max_tokens=...)`, or per call; a per-call value wins. Omit it and
+the top-level `max_tokens` field is not sent.
 
 ```python
 from openrouter_mini import Prompt, ReasoningRequest, load_client
 
-client = load_client()
+client = load_client(max_tokens=4096)
+text = client(Prompt(system="...", user="..."), max_tokens=8192)
+```
+
+For a single call, use the adapter-owned immutable `ReasoningRequest`, with
+exactly one control: an effort from `ReasoningEffort` or a positive reasoning
+token budget. The controls are mutually exclusive and serialize beneath the
+request's `reasoning` field; omit `reasoning` to leave that field out.
+
+```python
 text = client(
     Prompt(system="...", user="..."),
     reasoning=ReasoningRequest(effort="high"),
 )
+
 # Or: ReasoningRequest(max_tokens=2048)
 ```
 
-`client.last_usage.reasoning_tokens` exposes the provider-reported reasoning
-token count when available. Reasoning tokens are included in completion/output
-token billing; provider minimums vary, so choose a supported budget.
+Reasoning tokens, when reported, are exposed as `last_usage.reasoning_tokens`
+and are part of completion/output billing.
 
 ## Develop
 
 ```bash
-make test   # or: python3 -m unittest discover -s tests
+make test
 ```
 
-Tests are deterministic — they inject a fake HTTP client, so no live key or network
-is needed.
+Tests inject a fake HTTP client; no API key, live provider call, or network is
+needed.
