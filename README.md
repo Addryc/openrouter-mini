@@ -81,6 +81,27 @@ It is forwarded verbatim as the request body's `max_tokens` field. Omit it (the
 default) and the field is not sent, leaving request bodies identical to previous
 releases.
 
+### Reasoning controls
+
+Use the adapter-owned `ReasoningRequest` per call to select either a reasoning
+effort level or a positive reasoning-token budget. The two controls are mutually
+exclusive; omit `reasoning` to leave existing request bodies unchanged.
+
+```python
+from openrouter_mini import Prompt, ReasoningRequest, load_client
+
+client = load_client()
+text = client(
+    Prompt(system="...", user="..."),
+    reasoning=ReasoningRequest(effort="high"),
+)
+# Or: ReasoningRequest(max_tokens=2048)
+```
+
+`client.last_usage.reasoning_tokens` exposes the provider-reported reasoning
+token count when available. Reasoning tokens are included in completion/output
+token billing; provider minimums vary, so choose a supported budget.
+
 ## Develop
 
 ```bash

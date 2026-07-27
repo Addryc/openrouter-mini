@@ -11,7 +11,7 @@ from __future__ import annotations
 import json
 import os
 from dataclasses import dataclass
-from typing import Any, Iterator
+from typing import Any, Iterator, Literal, get_args
 
 import httpx
 
@@ -20,6 +20,8 @@ DEFAULT_MODEL = "anthropic/claude-sonnet-4.6"
 DEFAULT_REQUEST_TIMEOUT_SECONDS = 120.0
 OPENROUTER_API_KEY_ENV = "OPENROUTER_API_KEY"
 OPENROUTER_MODEL_ENV = "OPENROUTER_MODEL"
+ReasoningEffort = Literal["max", "xhigh", "high", "medium", "low", "minimal", "none"]
+REASONING_EFFORTS = frozenset(get_args(ReasoningEffort))
 
 
 class OpenRouterError(RuntimeError):
@@ -47,6 +49,33 @@ class Prompt:
 
 
 @dataclass(frozen=True)
+class ReasoningRequest:
+    """A provider-neutral reasoning policy for one chat-completions request.
+
+    Exactly one control is required: a named effort level or a positive
+    reasoning-token budget. The adapter serializes this policy into
+    OpenRouter's ``reasoning`` body field; callers never pass provider JSON.
+    """
+
+    effort: ReasoningEffort | None = None
+    max_tokens: int | None = None
+
+    def __post_init__(self) -> None:
+        if (self.effort is None) == (self.max_tokens is None):
+            raise ValueError("reasoning requires exactly one of effort or max_tokens")
+        if self.effort is not None and (
+            not isinstance(self.effort, str) or self.effort not in REASONING_EFFORTS
+        ):
+            raise ValueError(f"unsupported reasoning effort: {self.effort!r}")
+        if self.max_tokens is not None and (
+            isinstance(self.max_tokens, bool)
+            or not isinstance(self.max_tokens, int)
+            or self.max_tokens <= 0
+        ):
+            raise ValueError("reasoning max_tokens must be a positive integer")
+
+
+@dataclass(frozen=True)
 class Usage:
     """Adapter-owned per-call usage summary, normalized from the provider block."""
 
@@ -55,6 +84,7 @@ class Usage:
     total_tokens: int | None = None
     cached_tokens: int | None = None
     cache_write_tokens: int | None = None
+    reasoning_tokens: int | None = None
     cost: float | None = None
 
 
@@ -120,20 +150,37 @@ class OpenRouterClient:
     def config(self) -> OpenRouterConfig:
         return self._config
 
-    def __call__(self, prompt: Prompt, *, max_tokens: int | None = None) -> str:
+    def __call__(
+        self,
+        prompt: Prompt,
+        *,
+        max_tokens: int | None = None,
+        reasoning: ReasoningRequest | None = None,
+    ) -> str:
         self.last_usage = None
         self.last_raw_usage = None
-        payload = self._post(prompt, max_tokens=max_tokens)
+        payload = self._post(prompt, max_tokens=max_tokens, reasoning=reasoning)
         content = _extract_content(payload)
         self.last_usage = _extract_usage(payload)
         raw_usage = payload.get("usage")
         self.last_raw_usage = raw_usage if isinstance(raw_usage, dict) else None
         return content
 
-    def stream(self, prompt: Prompt, *, max_tokens: int | None = None) -> Iterator[str]:
+    def stream(
+        self,
+        prompt: Prompt,
+        *,
+        max_tokens: int | None = None,
+        reasoning: ReasoningRequest | None = None,
+    ) -> Iterator[str]:
         self.last_usage = None
         self.last_raw_usage = None
-        body = self._request_body(prompt, stream=True, max_tokens=max_tokens)
+        body = self._request_body(
+            prompt,
+            stream=True,
+            max_tokens=max_tokens,
+            reasoning=reasoning,
+        )
         headers = self._headers()
         if self._http_client is None:
             timeout = httpx.Timeout(self._config.request_timeout_seconds)
@@ -142,8 +189,14 @@ class OpenRouterClient:
             return
         yield from self._stream(self._http_client, headers, body)
 
-    def _post(self, prompt: Prompt, *, max_tokens: int | None = None) -> dict[str, Any]:
-        body = self._request_body(prompt, max_tokens=max_tokens)
+    def _post(
+        self,
+        prompt: Prompt,
+        *,
+        max_tokens: int | None = None,
+        reasoning: ReasoningRequest | None = None,
+    ) -> dict[str, Any]:
+        body = self._request_body(prompt, max_tokens=max_tokens, reasoning=reasoning)
         headers = self._headers()
         if self._http_client is None:
             timeout = httpx.Timeout(self._config.request_timeout_seconds)
@@ -157,6 +210,7 @@ class OpenRouterClient:
         *,
         stream: bool = False,
         max_tokens: int | None = None,
+        reasoning: ReasoningRequest | None = None,
     ) -> dict[str, Any]:
         body: dict[str, Any] = {
             "model": self._config.model,
@@ -170,6 +224,8 @@ class OpenRouterClient:
         resolved_max_tokens = max_tokens if max_tokens is not None else self._config.max_tokens
         if resolved_max_tokens is not None:
             body["max_tokens"] = resolved_max_tokens
+        if reasoning is not None:
+            body["reasoning"] = _reasoning_body(reasoning)
         if stream:
             body["stream"] = True
             body["stream_options"] = {"include_usage": True}
@@ -270,6 +326,12 @@ def _messages_for_prompt(prompt: Prompt) -> list[dict[str, Any]]:
     return messages
 
 
+def _reasoning_body(reasoning: ReasoningRequest) -> dict[str, str | int]:
+    if reasoning.effort is not None:
+        return {"effort": reasoning.effort}
+    return {"max_tokens": reasoning.max_tokens}
+
+
 def _request(client: Any, headers: dict[str, str], body: dict[str, Any]) -> dict[str, Any]:
     try:
         response = client.post(OPENROUTER_CHAT_COMPLETIONS_URL, headers=headers, json=body)
@@ -327,12 +389,16 @@ def _extract_usage(payload: dict[str, Any]) -> Usage:
         details = {}
     cached = details.get("cached_tokens", raw_usage.get("cached_tokens"))
     cache_write = details.get("cache_write_tokens", raw_usage.get("cache_write_tokens"))
+    completion_details = raw_usage.get("completion_tokens_details")
+    if not isinstance(completion_details, dict):
+        completion_details = {}
     return Usage(
         prompt_tokens=_as_int(raw_usage.get("prompt_tokens")),
         completion_tokens=_as_int(raw_usage.get("completion_tokens")),
         total_tokens=_as_int(raw_usage.get("total_tokens")),
         cached_tokens=_as_int(cached),
         cache_write_tokens=_as_int(cache_write),
+        reasoning_tokens=_as_int(completion_details.get("reasoning_tokens")),
         cost=_resolve_cost(raw_usage),
     )
 
