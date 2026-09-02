@@ -102,6 +102,15 @@ class OpenRouterConfig:
     ``max_tokens`` is the default output cap sent as the request body's
     ``max_tokens`` field; individual calls can override it. ``None`` (the
     default) omits the field entirely.
+
+    ``response_format`` is passed through verbatim as the request body's
+    ``response_format`` field (OpenRouter's JSON-schema structured output,
+    e.g. ``{"type": "json_schema", "json_schema": {...}}``). The mapping is
+    untyped on purpose — its shape belongs to OpenRouter and the model, not
+    this adapter — and ``None`` (the default) omits the field entirely.
+    Individual calls can override it, like ``max_tokens``. Not every model
+    supports or honors ``response_format``; consumers should gate its use per
+    model.
     """
 
     api_key: str
@@ -109,6 +118,7 @@ class OpenRouterConfig:
     request_timeout_seconds: float = DEFAULT_REQUEST_TIMEOUT_SECONDS
     provider_preferences: dict[str, Any] | None = None
     max_tokens: int | None = None
+    response_format: dict[str, Any] | None = None
 
 
 def load_config(
@@ -117,6 +127,7 @@ def load_config(
     model: str | None = None,
     provider_preferences: dict[str, Any] | None = None,
     max_tokens: int | None = None,
+    response_format: dict[str, Any] | None = None,
 ) -> OpenRouterConfig:
     """Resolve configuration from explicit values or the environment."""
 
@@ -129,6 +140,7 @@ def load_config(
         model=resolved_model,
         provider_preferences=provider_preferences,
         max_tokens=max_tokens,
+        response_format=response_format,
     )
 
 
@@ -156,10 +168,16 @@ class OpenRouterClient:
         *,
         max_tokens: int | None = None,
         reasoning: ReasoningRequest | None = None,
+        response_format: dict[str, Any] | None = None,
     ) -> str:
         self.last_usage = None
         self.last_raw_usage = None
-        payload = self._post(prompt, max_tokens=max_tokens, reasoning=reasoning)
+        payload = self._post(
+            prompt,
+            max_tokens=max_tokens,
+            reasoning=reasoning,
+            response_format=response_format,
+        )
         content = _extract_content(payload)
         self.last_usage = _extract_usage(payload)
         raw_usage = payload.get("usage")
@@ -172,6 +190,7 @@ class OpenRouterClient:
         *,
         max_tokens: int | None = None,
         reasoning: ReasoningRequest | None = None,
+        response_format: dict[str, Any] | None = None,
     ) -> Iterator[str]:
         self.last_usage = None
         self.last_raw_usage = None
@@ -180,6 +199,7 @@ class OpenRouterClient:
             stream=True,
             max_tokens=max_tokens,
             reasoning=reasoning,
+            response_format=response_format,
         )
         headers = self._headers()
         if self._http_client is None:
@@ -195,8 +215,14 @@ class OpenRouterClient:
         *,
         max_tokens: int | None = None,
         reasoning: ReasoningRequest | None = None,
+        response_format: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        body = self._request_body(prompt, max_tokens=max_tokens, reasoning=reasoning)
+        body = self._request_body(
+            prompt,
+            max_tokens=max_tokens,
+            reasoning=reasoning,
+            response_format=response_format,
+        )
         headers = self._headers()
         if self._http_client is None:
             timeout = httpx.Timeout(self._config.request_timeout_seconds)
@@ -211,6 +237,7 @@ class OpenRouterClient:
         stream: bool = False,
         max_tokens: int | None = None,
         reasoning: ReasoningRequest | None = None,
+        response_format: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         body: dict[str, Any] = {
             "model": self._config.model,
@@ -226,6 +253,11 @@ class OpenRouterClient:
             body["max_tokens"] = resolved_max_tokens
         if reasoning is not None:
             body["reasoning"] = _reasoning_body(reasoning)
+        resolved_response_format = (
+            response_format if response_format is not None else self._config.response_format
+        )
+        if resolved_response_format is not None:
+            body["response_format"] = dict(resolved_response_format)
         if stream:
             body["stream"] = True
             body["stream_options"] = {"include_usage": True}
@@ -291,6 +323,7 @@ def load_client(
     http_client: Any | None = None,
     provider_preferences: dict[str, Any] | None = None,
     max_tokens: int | None = None,
+    response_format: dict[str, Any] | None = None,
 ) -> OpenRouterClient:
     """Build a client from the environment (or explicit overrides)."""
 
@@ -300,6 +333,7 @@ def load_client(
             model=model,
             provider_preferences=provider_preferences,
             max_tokens=max_tokens,
+            response_format=response_format,
         ),
         http_client=http_client,
     )
