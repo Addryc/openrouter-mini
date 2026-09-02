@@ -37,6 +37,11 @@ pip install -e /path/to/openrouter-mini
 `OpenRouterError` is the public base error; configuration, request, and
 unexpected-response failures use its typed subclasses.
 
+Requesting structured output? Models often wrap JSON in prose or markdown
+fences even when asked for JSON alone; `extract_json_candidate` pulls the
+likely JSON span out of the raw text before you parse it — see
+[Structured output](#structured-output).
+
 ```python
 from openrouter_mini import OpenRouterError, Prompt, load_client
 
@@ -124,6 +129,42 @@ text = client(
 
 Reasoning tokens, when reported, are exposed as `last_usage.reasoning_tokens`
 and are part of completion/output billing.
+
+## Structured output
+
+Pass `response_format` to request OpenRouter's JSON-schema structured output
+for models that support it:
+
+```python
+schema = {
+    "type": "json_schema",
+    "json_schema": {"name": "reply", "schema": {"type": "object", "properties": {...}}},
+}
+client = load_client(response_format=schema)
+text = client(Prompt(system="...", user="..."), response_format=schema)  # per-call overrides config
+```
+
+The mapping is forwarded verbatim as the request's `response_format` field
+and is untyped on purpose — its shape belongs to OpenRouter and the model.
+Omit it to omit the field; a per-call value wins over the config default,
+like `max_tokens`. Not every model supports or honors `response_format`;
+consumers must gate its use per model rather than relying on the adapter to
+validate it. Schema validation, repair loops, and re-prompting on failure
+remain the consumer's responsibility.
+
+`extract_json_candidate(text)` strips a leading/trailing markdown fence, then
+narrows to the span from the first `{`/`[` to the last `}`/`]`, returning the
+stripped input unchanged when no bracket is found:
+
+```python
+from openrouter_mini import extract_json_candidate
+
+candidate = extract_json_candidate(text)  # text: raw model output
+data = json.loads(candidate)
+```
+
+It has no dependencies and does no validation; parsing and schema checking
+are the consumer's responsibility.
 
 ## Develop
 

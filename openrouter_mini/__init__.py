@@ -26,6 +26,7 @@ from openrouter_mini.client import (
     load_client,
     load_config,
 )
+from openrouter_mini.json_extract import extract_json_candidate
 
 __all__ = [
     "DEFAULT_MODEL",
@@ -44,8 +45,9 @@ __all__ = [
     "ReasoningRequest",
     "Usage",
     "build_client",
+    "extract_json_candidate",
     "load_client",
     "load_config",
 ]
 
-__version__ = "0.6.0"
+__version__ = "0.7.0"

@@ -283,6 +283,78 @@ class OpenRouterClientTest(unittest.TestCase):
         config = load_config(api_key="k", model="m", max_tokens=512)
         self.assertEqual(config.max_tokens, 512)
 
+    def test_no_response_format_field_by_default(self) -> None:
+        fake = _FakeClient(_FakeResponse(_ok_payload()))
+        client = OpenRouterClient(_config(), http_client=fake)
+
+        client(Prompt(system="s", user="u"))
+
+        self.assertNotIn("response_format", fake.posted["json"])
+
+    def test_config_response_format_is_sent(self) -> None:
+        response_format = {"type": "json_schema", "json_schema": {"name": "schema"}}
+        fake = _FakeClient(_FakeResponse(_ok_payload()))
+        config = OpenRouterConfig(
+            api_key="key", model="test-model", response_format=response_format
+        )
+        client = OpenRouterClient(config, http_client=fake)
+
+        client(Prompt(system="s", user="u"))
+
+        self.assertEqual(fake.posted["json"]["response_format"], response_format)
+
+    def test_per_call_response_format_overrides_config(self) -> None:
+        config_format = {"type": "json_schema", "json_schema": {"name": "config"}}
+        call_format = {"type": "json_schema", "json_schema": {"name": "call"}}
+        fake = _FakeClient(_FakeResponse(_ok_payload()))
+        config = OpenRouterConfig(
+            api_key="key", model="test-model", response_format=config_format
+        )
+        client = OpenRouterClient(config, http_client=fake)
+
+        client(Prompt(system="s", user="u"), response_format=call_format)
+
+        self.assertEqual(fake.posted["json"]["response_format"], call_format)
+
+    def test_per_call_response_format_without_config_default(self) -> None:
+        response_format = {"type": "json_schema", "json_schema": {"name": "schema"}}
+        fake = _FakeClient(_FakeResponse(_ok_payload()))
+        client = OpenRouterClient(_config(), http_client=fake)
+
+        client(Prompt(system="s", user="u"), response_format=response_format)
+
+        self.assertEqual(fake.posted["json"]["response_format"], response_format)
+
+    def test_stream_carries_response_format(self) -> None:
+        response_format = {"type": "json_schema", "json_schema": {"name": "schema"}}
+        lines = [
+            'data: {"choices":[{"delta":{"content":"hello"}}]}',
+            "data: [DONE]",
+        ]
+        fake = _FakeClient(_FakeResponse(None, lines=lines))
+        client = OpenRouterClient(_config(), http_client=fake)
+
+        "".join(client.stream(Prompt(system="s", user="u"), response_format=response_format))
+
+        self.assertEqual(fake.streamed["json"]["response_format"], response_format)
+
+    def test_stream_omits_response_format_by_default(self) -> None:
+        lines = [
+            'data: {"choices":[{"delta":{"content":"hello"}}]}',
+            "data: [DONE]",
+        ]
+        fake = _FakeClient(_FakeResponse(None, lines=lines))
+        client = OpenRouterClient(_config(), http_client=fake)
+
+        "".join(client.stream(Prompt(system="s", user="u")))
+
+        self.assertNotIn("response_format", fake.streamed["json"])
+
+    def test_load_config_carries_response_format(self) -> None:
+        response_format = {"type": "json_schema", "json_schema": {"name": "schema"}}
+        config = load_config(api_key="k", model="m", response_format=response_format)
+        self.assertEqual(config.response_format, response_format)
+
     def test_cost_falls_back_to_upstream_under_byok(self) -> None:
         usage = {
             "prompt_tokens": 3114,
