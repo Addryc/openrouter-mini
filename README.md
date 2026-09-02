@@ -59,6 +59,11 @@ the provider omits it: `prompt_tokens`, `completion_tokens`, `total_tokens`,
 diagnostics such as cache verification. For BYOK responses with a zero top-level
 cost, `cost` falls back to `cost_details.upstream_inference_cost` when supplied.
 
+Requesting structured output? Models often wrap JSON in prose or markdown
+fences even when asked for JSON alone; `extract_json_candidate` pulls the
+likely JSON span out of the raw text before you parse it — see
+[Structured output](#structured-output).
+
 ## Stream a request
 
 `stream()` yields text deltas. Consume the iterator fully before reading final
@@ -145,8 +150,21 @@ Omit it to omit the field; a per-call value wins over the config default,
 like `max_tokens`. Not every model supports or honors `response_format`;
 consumers must gate its use per model rather than relying on the adapter to
 validate it. Schema validation, repair loops, and re-prompting on failure
-remain the consumer's responsibility — see `extract_json_candidate` below for
-pulling a JSON string out of a model's raw text before parsing it.
+remain the consumer's responsibility.
+
+`extract_json_candidate(text)` strips a leading/trailing markdown fence, then
+narrows to the span from the first `{`/`[` to the last `}`/`]`, returning the
+stripped input unchanged when no bracket is found:
+
+```python
+from openrouter_mini import extract_json_candidate
+
+candidate = extract_json_candidate(text)  # text: raw model output
+data = json.loads(candidate)
+```
+
+It has no dependencies and does no validation; parsing and schema checking
+are the consumer's responsibility.
 
 ## Develop
 
