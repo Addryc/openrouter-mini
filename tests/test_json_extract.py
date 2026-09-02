@@ -31,12 +31,17 @@ class ExtractJsonCandidateTest(unittest.TestCase):
         text = 'Sure, here is the JSON:\n{"a": 1}'
         self.assertEqual(extract_json_candidate(text), '{"a": 1}')
 
-    def test_trailing_prose_after_object_is_not_trimmed(self) -> None:
-        # A stripped candidate that already starts with `{`/`[` is returned as-is
-        # without narrowing to the closing bracket, matching story-builder's ported
-        # behavior: only a leading fence or leading prose triggers narrowing.
+    def test_trailing_prose_after_object_is_trimmed(self) -> None:
         text = '{"a": 1}\nLet me know if that helps!'
-        self.assertEqual(extract_json_candidate(text), text)
+        self.assertEqual(extract_json_candidate(text), '{"a": 1}')
+
+    def test_fence_with_trailing_sign_off_is_trimmed(self) -> None:
+        # _strip_markdown_fence only drops a closing fence when it is the last
+        # line, so a sign-off after the fence would otherwise leave the closing
+        # ``` and prose in the candidate; the bracket narrowing must still cut
+        # it off.
+        text = '```json\n{"a": 1}\n```\nHope this helps.'
+        self.assertEqual(extract_json_candidate(text), '{"a": 1}')
 
     def test_leading_and_trailing_prose_around_array(self) -> None:
         text = "Here you go:\n[1, 2, 3]\nHope that works."

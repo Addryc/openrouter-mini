@@ -37,6 +37,11 @@ pip install -e /path/to/openrouter-mini
 `OpenRouterError` is the public base error; configuration, request, and
 unexpected-response failures use its typed subclasses.
 
+Requesting structured output? Models often wrap JSON in prose or markdown
+fences even when asked for JSON alone; `extract_json_candidate` pulls the
+likely JSON span out of the raw text before you parse it — see
+[Structured output](#structured-output).
+
 ```python
 from openrouter_mini import OpenRouterError, Prompt, load_client
 
@@ -58,11 +63,6 @@ the provider omits it: `prompt_tokens`, `completion_tokens`, `total_tokens`,
 `last_raw_usage` retains the raw provider `usage` mapping when present for
 diagnostics such as cache verification. For BYOK responses with a zero top-level
 cost, `cost` falls back to `cost_details.upstream_inference_cost` when supplied.
-
-Requesting structured output? Models often wrap JSON in prose or markdown
-fences even when asked for JSON alone; `extract_json_candidate` pulls the
-likely JSON span out of the raw text before you parse it — see
-[Structured output](#structured-output).
 
 ## Stream a request
 

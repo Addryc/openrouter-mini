@@ -110,7 +110,10 @@ class OpenRouterConfig:
     this adapter — and ``None`` (the default) omits the field entirely.
     Individual calls can override it, like ``max_tokens``. Not every model
     supports or honors ``response_format``; consumers should gate its use per
-    model.
+    model. Like ``provider_preferences``, only the top-level mapping is
+    copied before sending — nested values (e.g. the ``json_schema`` dict) are
+    shared with the caller's object, so mutating them after the call is not
+    isolated from what was sent.
     """
 
     api_key: str

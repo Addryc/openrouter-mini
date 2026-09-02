@@ -15,15 +15,15 @@ def extract_json_candidate(text: str) -> str:
     """Return the likely JSON span within ``text``.
 
     Strips a leading/trailing markdown fence, then narrows to the span from
-    the first ``{``/``[`` to the last ``}``/``]``. Falls back to the stripped
-    input when no bracket is found.
+    the first ``{``/``[`` to the last matching ``}``/``]`` — trimming both
+    leading prose/fence and any trailing prose/fence, on either side of the
+    bracket. Falls back to the stripped input when no bracket is found, or
+    when a bracket opens but never closes.
     """
 
     stripped = text.strip()
     if stripped.startswith("```"):
         stripped = _strip_markdown_fence(stripped)
-    if stripped.startswith("{") or stripped.startswith("["):
-        return stripped
     start_candidates = [index for index in (stripped.find("{"), stripped.find("[")) if index != -1]
     if not start_candidates:
         return stripped
