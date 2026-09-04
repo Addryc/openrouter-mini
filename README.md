@@ -81,6 +81,33 @@ print(client.last_usage)
 print(client.last_raw_usage)
 ```
 
+## Deadline
+
+`request_timeout_seconds` (default 120 s, via `httpx.Timeout`) is a per-read
+timeout: it only fires when the connection goes silent between bytes.
+OpenRouter keeps some long requests alive with periodic bytes, so a stuck
+upstream can hold a call open far longer than that budget while still
+technically "streaming." `request_deadline_seconds` is a separate, opt-in
+wall-clock budget for the whole request — from before the request is sent to
+the last byte read — that `httpx.Timeout` cannot express on its own.
+
+Set it via `OpenRouterConfig.request_deadline_seconds`, `load_client(...)` /
+`load_config(deadline_seconds=...)`, or the `OPENROUTER_REQUEST_DEADLINE_SECONDS`
+environment variable (used when no explicit value is given). `None` (the
+default) leaves current behavior unchanged — only the per-read timeout
+applies. Exceeding the deadline raises `OpenRouterDeadlineError` (a subclass
+of `OpenRouterRequestError`) with `deadline_seconds` and `elapsed_seconds`.
+
+```python
+from openrouter_mini import OpenRouterDeadlineError, Prompt, load_client
+
+client = load_client()  # OPENROUTER_REQUEST_DEADLINE_SECONDS, if set
+try:
+    text = client(Prompt(system="...", user="..."))
+except OpenRouterDeadlineError as exc:
+    print(exc.deadline_seconds, exc.elapsed_seconds)
+```
+
 ## Prompt caching and provider routing
 
 Non-empty `system` text is sent as a cacheable text block

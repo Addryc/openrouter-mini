@@ -12,9 +12,11 @@ from openrouter_mini.client import (
     OPENROUTER_API_KEY_ENV,
     OPENROUTER_CHAT_COMPLETIONS_URL,
     OPENROUTER_MODEL_ENV,
+    OPENROUTER_REQUEST_DEADLINE_ENV,
     OpenRouterClient,
     OpenRouterConfig,
     OpenRouterConfigurationError,
+    OpenRouterDeadlineError,
     OpenRouterError,
     OpenRouterRequestError,
     OpenRouterResponseError,
@@ -34,9 +36,11 @@ __all__ = [
     "OPENROUTER_API_KEY_ENV",
     "OPENROUTER_CHAT_COMPLETIONS_URL",
     "OPENROUTER_MODEL_ENV",
+    "OPENROUTER_REQUEST_DEADLINE_ENV",
     "OpenRouterClient",
     "OpenRouterConfig",
     "OpenRouterConfigurationError",
+    "OpenRouterDeadlineError",
     "OpenRouterError",
     "OpenRouterRequestError",
     "OpenRouterResponseError",
@@ -50,4 +54,4 @@ __all__ = [
     "load_config",
 ]
 
-__version__ = "0.7.0"
+__version__ = "0.8.0"
