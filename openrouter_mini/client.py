@@ -10,8 +10,9 @@ from __future__ import annotations
 
 import json
 import os
+import time
 from dataclasses import dataclass
-from typing import Any, Iterator, Literal, get_args
+from typing import Any, Callable, Iterator, Literal, get_args
 
 import httpx
 
@@ -20,6 +21,7 @@ DEFAULT_MODEL = "anthropic/claude-sonnet-4.6"
 DEFAULT_REQUEST_TIMEOUT_SECONDS = 120.0
 OPENROUTER_API_KEY_ENV = "OPENROUTER_API_KEY"
 OPENROUTER_MODEL_ENV = "OPENROUTER_MODEL"
+OPENROUTER_REQUEST_DEADLINE_ENV = "OPENROUTER_REQUEST_DEADLINE_SECONDS"
 ReasoningEffort = Literal["max", "xhigh", "high", "medium", "low", "minimal", "none"]
 REASONING_EFFORTS = frozenset(get_args(ReasoningEffort))
 
@@ -34,6 +36,23 @@ class OpenRouterConfigurationError(OpenRouterError):
 
 class OpenRouterRequestError(OpenRouterError):
     """Raised when the HTTP request to OpenRouter fails."""
+
+
+class OpenRouterDeadlineError(OpenRouterRequestError):
+    """Raised when a request exceeds its configured wall-clock deadline.
+
+    OpenRouter keeps some long requests alive with periodic bytes, so httpx's
+    per-read timeout never fires while an upstream hangs. This is a stricter,
+    opt-in wall-clock budget on top of that read timeout.
+    """
+
+    def __init__(self, deadline_seconds: float, elapsed_seconds: float) -> None:
+        self.deadline_seconds = deadline_seconds
+        self.elapsed_seconds = elapsed_seconds
+        super().__init__(
+            f"OpenRouter request exceeded the {deadline_seconds:g} s deadline "
+            f"after {elapsed_seconds:.1f} s"
+        )
 
 
 class OpenRouterResponseError(OpenRouterError):
@@ -114,6 +133,11 @@ class OpenRouterConfig:
     copied before sending — nested values (e.g. the ``json_schema`` dict) are
     shared with the caller's object, so mutating them after the call is not
     isolated from what was sent.
+
+    ``request_deadline_seconds`` is an opt-in wall-clock budget for the whole
+    request (send through fully-read response), on top of
+    ``request_timeout_seconds``'s per-read timeout. ``None`` (the default)
+    leaves today's behavior unchanged: only the per-read timeout applies.
     """
 
     api_key: str
@@ -122,6 +146,7 @@ class OpenRouterConfig:
     provider_preferences: dict[str, Any] | None = None
     max_tokens: int | None = None
     response_format: dict[str, Any] | None = None
+    request_deadline_seconds: float | None = None
 
 
 def load_config(
@@ -131,6 +156,7 @@ def load_config(
     provider_preferences: dict[str, Any] | None = None,
     max_tokens: int | None = None,
     response_format: dict[str, Any] | None = None,
+    deadline_seconds: float | None = None,
 ) -> OpenRouterConfig:
     """Resolve configuration from explicit values or the environment."""
 
@@ -138,13 +164,38 @@ def load_config(
     if not resolved_key:
         raise OpenRouterConfigurationError(f"{OPENROUTER_API_KEY_ENV} is required")
     resolved_model = model or os.getenv(OPENROUTER_MODEL_ENV) or DEFAULT_MODEL
+    resolved_deadline = _resolve_deadline_seconds(deadline_seconds)
     return OpenRouterConfig(
         api_key=resolved_key,
         model=resolved_model,
         provider_preferences=provider_preferences,
         max_tokens=max_tokens,
         response_format=response_format,
+        request_deadline_seconds=resolved_deadline,
     )
+
+
+def _resolve_deadline_seconds(deadline_seconds: float | None) -> float | None:
+    if deadline_seconds is not None:
+        if deadline_seconds <= 0:
+            raise OpenRouterConfigurationError(
+                f"deadline_seconds must be positive, got {deadline_seconds!r}"
+            )
+        return deadline_seconds
+    env_value = os.getenv(OPENROUTER_REQUEST_DEADLINE_ENV)
+    if env_value is None:
+        return None
+    try:
+        parsed = float(env_value)
+    except ValueError as exc:
+        raise OpenRouterConfigurationError(
+            f"{OPENROUTER_REQUEST_DEADLINE_ENV} must be a number, got {env_value!r}"
+        ) from exc
+    if parsed <= 0:
+        raise OpenRouterConfigurationError(
+            f"{OPENROUTER_REQUEST_DEADLINE_ENV} must be positive, got {parsed!r}"
+        )
+    return parsed
 
 
 class OpenRouterClient:
@@ -155,9 +206,16 @@ class OpenRouterClient:
     verification). Both reset to ``None`` at the start of every call.
     """
 
-    def __init__(self, config: OpenRouterConfig, *, http_client: Any | None = None) -> None:
+    def __init__(
+        self,
+        config: OpenRouterConfig,
+        *,
+        http_client: Any | None = None,
+        clock: Callable[[], float] | None = None,
+    ) -> None:
         self._config = config
         self._http_client = http_client
+        self._clock: Callable[[], float] = clock if clock is not None else time.monotonic
         self.last_usage: Usage | None = None
         self.last_raw_usage: dict[str, Any] | None = None
 
@@ -227,11 +285,12 @@ class OpenRouterClient:
             response_format=response_format,
         )
         headers = self._headers()
+        deadline = self._config.request_deadline_seconds
         if self._http_client is None:
             timeout = httpx.Timeout(self._config.request_timeout_seconds)
             with httpx.Client(timeout=timeout) as http_client:
-                return _request(http_client, headers, body)
-        return _request(self._http_client, headers, body)
+                return _request(http_client, headers, body, deadline=deadline, clock=self._clock)
+        return _request(self._http_client, headers, body, deadline=deadline, clock=self._clock)
 
     def _request_body(
         self,
@@ -273,6 +332,8 @@ class OpenRouterClient:
         }
 
     def _stream(self, client: Any, headers: dict[str, str], body: dict[str, Any]) -> Iterator[str]:
+        deadline = self._config.request_deadline_seconds
+        started = self._clock()
         terminal_payload: dict[str, Any] | None = None
         try:
             with client.stream(
@@ -283,6 +344,7 @@ class OpenRouterClient:
             ) as response:
                 response.raise_for_status()
                 for line in response.iter_lines():
+                    _check_deadline(self._clock, started, deadline)
                     if not line or not line.startswith("data: "):
                         continue
                     data = line.removeprefix("data: ")
@@ -369,14 +431,44 @@ def _reasoning_body(reasoning: ReasoningRequest) -> dict[str, str | int]:
     return {"max_tokens": reasoning.max_tokens}
 
 
-def _request(client: Any, headers: dict[str, str], body: dict[str, Any]) -> dict[str, Any]:
+def _check_deadline(
+    clock: Callable[[], float], started: float, deadline: float | None
+) -> None:
+    if deadline is None:
+        return
+    elapsed = clock() - started
+    if elapsed > deadline:
+        raise OpenRouterDeadlineError(deadline, elapsed)
+
+
+def _request(
+    client: Any,
+    headers: dict[str, str],
+    body: dict[str, Any],
+    *,
+    deadline: float | None,
+    clock: Callable[[], float],
+) -> dict[str, Any]:
+    started = clock()
+    buffer = bytearray()
     try:
-        response = client.post(OPENROUTER_CHAT_COMPLETIONS_URL, headers=headers, json=body)
-        response.raise_for_status()
+        with client.stream(
+            "POST", OPENROUTER_CHAT_COMPLETIONS_URL, headers=headers, json=body
+        ) as response:
+            try:
+                response.raise_for_status()
+            except httpx.HTTPStatusError:
+                # Buffer the body before re-raising so `exc.response.text` on the
+                # chained error stays readable for callers (actor-runtime #83).
+                response.read()
+                raise
+            for chunk in response.iter_bytes():
+                buffer += chunk
+                _check_deadline(clock, started, deadline)
     except (httpx.RequestError, httpx.HTTPStatusError) as exc:
         raise OpenRouterRequestError("OpenRouter request failed") from exc
     try:
-        payload = response.json()
+        payload = json.loads(bytes(buffer))
     except ValueError as exc:
         raise OpenRouterResponseError("OpenRouter returned invalid JSON") from exc
     if not isinstance(payload, dict):

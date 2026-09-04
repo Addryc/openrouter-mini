@@ -12,6 +12,7 @@ from openrouter_mini import (
     OpenRouterClient,
     OpenRouterConfig,
     OpenRouterConfigurationError,
+    OpenRouterDeadlineError,
     OpenRouterRequestError,
     OpenRouterResponseError,
     Prompt,
@@ -19,7 +20,23 @@ from openrouter_mini import (
     ReasoningRequest,
     load_config,
 )
-from openrouter_mini.client import OPENROUTER_CHAT_COMPLETIONS_URL
+from openrouter_mini.client import (
+    OPENROUTER_CHAT_COMPLETIONS_URL,
+    OPENROUTER_REQUEST_DEADLINE_ENV,
+)
+
+
+class _FakeClock:
+    """A monotonic clock stub the fake response iterators can step by hand."""
+
+    def __init__(self, start: float = 0.0) -> None:
+        self.now = start
+
+    def __call__(self) -> float:
+        return self.now
+
+    def advance(self, seconds: float) -> None:
+        self.now += seconds
 
 
 class _FakeResponse:
@@ -30,19 +47,41 @@ class _FakeResponse:
         status_error: bool = False,
         bad_json: bool = False,
         lines=None,
+        chunks=None,
         raise_request_error_at: int | None = None,
+        clock: "_FakeClock | None" = None,
+        step_seconds: float = 0.0,
+        status_code: int = 500,
+        error_body: bytes = b"",
     ) -> None:
         self._payload = payload
         self._status_error = status_error
         self._bad_json = bad_json
         self._lines = list(lines or [])
+        if chunks is not None:
+            self._chunks = list(chunks)
+        elif bad_json:
+            self._chunks = [b"not-json"]
+        elif payload is not None:
+            self._chunks = [json.dumps(payload).encode()]
+        else:
+            self._chunks = []
         self._raise_request_error_at = raise_request_error_at
+        self._clock = clock
+        self._step_seconds = step_seconds
+        self._status_code = status_code
+        self._error_body = error_body
 
     def raise_for_status(self) -> None:
         if self._status_error:
             request = httpx.Request("POST", OPENROUTER_CHAT_COMPLETIONS_URL)
-            response = httpx.Response(500, request=request)
+            response = httpx.Response(
+                self._status_code, request=request, content=self._error_body
+            )
             raise httpx.HTTPStatusError("error", request=request, response=response)
+
+    def read(self) -> None:
+        return None
 
     def json(self):
         if self._bad_json:
@@ -53,7 +92,17 @@ class _FakeResponse:
         for index, line in enumerate(self._lines):
             if self._raise_request_error_at is not None and index == self._raise_request_error_at:
                 raise httpx.RequestError("boom")
+            if self._clock is not None:
+                self._clock.advance(self._step_seconds)
             yield line
+
+    def iter_bytes(self):
+        for index, chunk in enumerate(self._chunks):
+            if self._raise_request_error_at is not None and index == self._raise_request_error_at:
+                raise httpx.RequestError("boom")
+            if self._clock is not None:
+                self._clock.advance(self._step_seconds)
+            yield chunk
 
 
 class _FakeStreamContextManager:
@@ -81,14 +130,20 @@ class _FakeClient:
         return self._response
 
     def stream(self, method, url, *, headers, json):
+        # The non-streaming path (`_request`) now issues its POST via
+        # `client.stream(...)` too (decision #3), so record it under both
+        # `streamed` and the legacy `posted` shape existing assertions use.
         self.streamed = {"method": method, "url": url, "headers": headers, "json": json}
+        self.posted = {"url": url, "headers": headers, "json": json}
         if self._raise_request_error:
             raise httpx.RequestError("boom")
         return _FakeStreamContextManager(self._response)
 
 
-def _config() -> OpenRouterConfig:
-    return OpenRouterConfig(api_key="key", model="test-model")
+def _config(*, deadline_seconds: float | None = None) -> OpenRouterConfig:
+    return OpenRouterConfig(
+        api_key="key", model="test-model", request_deadline_seconds=deadline_seconds
+    )
 
 
 def _ok_payload(usage=None):
@@ -502,6 +557,115 @@ class OpenRouterClientTest(unittest.TestCase):
         with mock.patch.dict("os.environ", {}, clear=True):
             with self.assertRaises(OpenRouterConfigurationError):
                 load_config()
+
+
+class OpenRouterDeadlineTest(unittest.TestCase):
+    """Covers actor-runtime #86: an opt-in wall-clock request deadline."""
+
+    def test_nonstreaming_deadline_exceeded_raises_on_third_chunk(self) -> None:
+        clock = _FakeClock()
+        chunks = [b'{"choices"', b':[{"message"', b':{"content":"hi"}}]}']
+        fake = _FakeClient(
+            _FakeResponse(None, chunks=chunks, clock=clock, step_seconds=2.0)
+        )
+        client = OpenRouterClient(_config(deadline_seconds=5.0), http_client=fake, clock=clock)
+
+        with self.assertRaises(OpenRouterDeadlineError) as ctx:
+            client(Prompt(system="s", user="u"))
+
+        err = ctx.exception
+        self.assertEqual(err.deadline_seconds, 5.0)
+        self.assertEqual(err.elapsed_seconds, 6.0)
+        self.assertEqual(
+            str(err),
+            "OpenRouter request exceeded the 5 s deadline after 6.0 s",
+        )
+        self.assertIsInstance(err, OpenRouterRequestError)
+
+    def test_nonstreaming_deadline_not_exceeded_by_fast_body(self) -> None:
+        clock = _FakeClock()
+        fake = _FakeClient(_FakeResponse(_ok_payload({"prompt_tokens": 5}), clock=clock))
+        client = OpenRouterClient(_config(deadline_seconds=5.0), http_client=fake, clock=clock)
+
+        result = client(Prompt(system="s", user="u"))
+
+        self.assertEqual(result, "hello")
+        self.assertEqual(client.last_usage.prompt_tokens, 5)
+
+    def test_streaming_deadline_exceeded_raises_on_third_line(self) -> None:
+        clock = _FakeClock()
+        lines = [
+            'data: {"choices":[{"delta":{"content":"a"}}]}',
+            'data: {"choices":[{"delta":{"content":"b"}}]}',
+            'data: {"choices":[{"delta":{"content":"c"}}]}',
+        ]
+        fake = _FakeClient(
+            _FakeResponse(None, lines=lines, clock=clock, step_seconds=2.0)
+        )
+        client = OpenRouterClient(_config(deadline_seconds=5.0), http_client=fake, clock=clock)
+
+        with self.assertRaises(OpenRouterDeadlineError) as ctx:
+            "".join(client.stream(Prompt(system="s", user="u")))
+
+        err = ctx.exception
+        self.assertEqual(err.deadline_seconds, 5.0)
+        self.assertEqual(err.elapsed_seconds, 6.0)
+        self.assertIsInstance(err, OpenRouterRequestError)
+
+    def test_streaming_deadline_not_exceeded_by_fast_body(self) -> None:
+        clock = _FakeClock()
+        lines = [
+            'data: {"choices":[{"delta":{"content":"hello"}}]}',
+            "data: [DONE]",
+        ]
+        fake = _FakeClient(_FakeResponse(None, lines=lines, clock=clock))
+        client = OpenRouterClient(_config(deadline_seconds=5.0), http_client=fake, clock=clock)
+
+        result = "".join(client.stream(Prompt(system="s", user="u")))
+
+        self.assertEqual(result, "hello")
+
+    def test_load_config_explicit_deadline_wins(self) -> None:
+        with mock.patch.dict(
+            "os.environ", {OPENROUTER_REQUEST_DEADLINE_ENV: "45"}, clear=True
+        ):
+            config = load_config(api_key="k", deadline_seconds=30)
+        self.assertEqual(config.request_deadline_seconds, 30)
+
+    def test_load_config_reads_deadline_from_environment(self) -> None:
+        with mock.patch.dict(
+            "os.environ", {OPENROUTER_REQUEST_DEADLINE_ENV: "45"}, clear=True
+        ):
+            config = load_config(api_key="k")
+        self.assertEqual(config.request_deadline_seconds, 45.0)
+
+    def test_load_config_deadline_unset_stays_none(self) -> None:
+        with mock.patch.dict("os.environ", {}, clear=True):
+            config = load_config(api_key="k")
+        self.assertIsNone(config.request_deadline_seconds)
+
+    def test_load_config_rejects_non_positive_or_unparsable_deadline(self) -> None:
+        for env_value in ("0", "-1", "abc"):
+            with self.subTest(env_value=env_value):
+                with mock.patch.dict(
+                    "os.environ", {OPENROUTER_REQUEST_DEADLINE_ENV: env_value}, clear=True
+                ):
+                    with self.assertRaises(OpenRouterConfigurationError):
+                        load_config(api_key="k")
+
+    def test_http_402_with_json_body_keeps_response_text_readable(self) -> None:
+        body = b'{"error": "payment required"}'
+        fake = _FakeClient(
+            _FakeResponse(None, status_error=True, status_code=402, error_body=body)
+        )
+        client = OpenRouterClient(_config(), http_client=fake)
+
+        with self.assertRaises(OpenRouterRequestError) as ctx:
+            client(Prompt(system="s", user="u"))
+
+        cause = ctx.exception.__cause__
+        self.assertIsInstance(cause, httpx.HTTPStatusError)
+        self.assertIn("payment required", cause.response.text)
 
 
 if __name__ == "__main__":
